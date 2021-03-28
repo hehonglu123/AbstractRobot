@@ -2,6 +2,7 @@ import RobotRaconteur as RR
 RRN=RR.RobotRaconteurNode.s
 import RobotRaconteurCompanion as RRC
 import numpy as np
+import RobotInfoConverter
 import traceback, os, copy, time, threading, warnings
 import GeneralRoboticsToolbox as Rox
 from RobotRaconteurCompanion.Util.DateTimeUtil import DateTimeUtil
@@ -9,6 +10,10 @@ from RobotRaconteurCompanion.Util.SensorDataUtil import SensorDataUtil
 
 class AbstractRobot(object):
     def __init__(self,robot_info,default_joint_count):
+        
+
+
+
         self._robot_info = robot_info
         if robot_info.joint_info::
             self._joint_names=[]
@@ -44,8 +49,7 @@ class AbstractRobot(object):
         
             self._rox_robots = []
             for i in range(robot_info.chains.Count):
-                ###lib RobotInfoConverter?
-                self._rox_robots[i].append(RobotInfoConverter.ToToolboxRobot(robot_info, i))
+                self._rox_robots[i].append(RobotInfoConverter.ToToolboxRobot(robot_info))
             
         
         except:   
@@ -66,9 +70,6 @@ class AbstractRobot(object):
             
                 self._current_payload[i].append(robot_info.chains[i].current_payload)
             
-        
-
-
 
         for i in range(_joint_count):
         
@@ -112,13 +113,46 @@ class AbstractRobot(object):
         self._jog_trajectory_generator=0
         self._jog_completion_source=0
 
+        self._jog_joint_limit = Math.PI * (10000.0 / 180.0)
+        self._trajectory_error_tol = Math.PI * (5.0 / 180.0)
+                
+        self._command_mode = RobotCommandMode.halt
+        self._operational_mode = RobotOperationalMode.manual_reduced_speed
+        self._controller_state = RobotControllerState.undefined
+
+        self._position_command = None
+        self._velocity_command = None
+
+
+        self._homed = False
+        self._ready = False
+        self._enabled = False
+        self._stopped = False
+        self._error = False
+        self._estop_source = 0
+
+        self._communication_failure = True
+        self._communication_timeout = 250 # milliseconds
+
+
+        self._speed_ratio = 1
+
+        self._uses_homing = False
+
+        self._has_position_command = False
+
+        self._has_velocity_command = False
+
+        self._has_jog_command = True
+
+        self._current_tool = None
+
+        self._current_payload = None
+
 
     def _start_robot(self):
-        ###lib Stopwatch?
-        if (not Stopwatch.IsHighResolution):
-            warnings.warn("warning: not using high resolution timer")
         
-        self._stopwatch = Stopwatch.StartNew()
+        # self._stopwatch = Stopwatch.StartNew()
         self._stopwatch_epoch = DateTimeUtil.TimeSpec2Now(RRN)
                     
         self._keep_going = True
@@ -134,10 +168,8 @@ class AbstractRobot(object):
 
     
     def _loop_thread_func(self):
-        ###lib Spinwait?
-        spin_wait = SpinWait()
 
-        next_wait = self._stopwatch.ElapsedMilliseconds
+        next_wait = time.time()
 
         now = next_wait
 
@@ -145,28 +177,25 @@ class AbstractRobot(object):
         
             self._run_timestep(now)
 
-            now = self._stopwatch.ElapsedMilliseconds
+            now = time.time()
             
             while(True):
             
-                next_wait += _update_period
+                next_wait += self._update_period
             
                 if next_wait <= now:
                     break
 
-            spin_wait.Reset()
-            while ((now = _stopwatch.ElapsedMilliseconds) < next_wait):
+            while (time.time() < next_wait):
             
-                spin_wait.SpinOnce()
+                time.sleep(0.01)
             
         
     
     #no value assigned?
-    _last_robot_state
-    _last_joint_state
-    _last_endpoint_state
-
-    public _now => _stopwatch.ElapsedMilliseconds
+    # _last_robot_state
+    # _last_joint_state
+    # _last_endpoint_state
 
     
     def Dispose(self):
@@ -192,7 +221,6 @@ class AbstractRobot(object):
             
 
             self._state_seqno++
-            ###out?
             res = self._verify_communication(now)
             res = res and self._verify_robot_state(now)
             res = res and self._fill_robot_command(now, joint_pos_cmd, joint_vel_cmd)
@@ -209,10 +237,7 @@ class AbstractRobot(object):
         
             self._send_robot_command(now, joint_pos_cmd, joint_vel_cmd)
         
-        ###using?
-        using (downsampler_step)
-        
-            _send_states(now, rr_robot_state, rr_advanced_robot_state, rr_state_sensor_data)                
+        self._send_states(now, rr_robot_state, rr_advanced_robot_state, rr_state_sensor_data)                
         
     
 
@@ -235,13 +260,13 @@ class AbstractRobot(object):
         
             f = f | RobotStateFlags.estop
 
-            if _estop_source==1:
+            if self._estop_source==1:
                 f = f | RobotStateFlags.estop_button1
-            elif _estop_source== 2:
+            elif self._estop_source== 2:
                 f = f | RobotStateFlags.estop_other
-            elif _estop_source== 3:
+            elif self._estop_source== 3:
                 f = f | RobotStateFlags.estop_fault
-            elif _estop_source== 4:
+            elif self._estop_source== 4:
                 f = f | RobotStateFlags.estop_internal                    
 
             
@@ -292,7 +317,7 @@ class AbstractRobot(object):
         # CALL LOCKED!
         if (self._current_tool[chain]):
         
-            return _endpoint_pose[chain]
+            return self._endpoint_pose[chain]
         ###lib GeometryConverter?
         endpoint_transform = GeometryConverter.ToTransform(self._endpoint_pose[chain])
         tool_transform = GeometryConverter.ToTransform(self._current_tool[chain].tcp)
@@ -304,18 +329,17 @@ class AbstractRobot(object):
     
         if (self._endpoint_pose)
             ###lib/array Pose?
-            return Pose[0]
+            return 
         
-
-        o = Pose[_endpoint_pose.Length]
-        for i in range(o.Length):
+        o=[]
+        for i in range(self._endpoint_pose.Length):
         
-            o[i] = self._calc_endpoint_pose(i)
+            o.append(self._calc_endpoint_pose(i))
         
         return o
     
 
-    def SpatialVelocity _calc_endpoint_vel(self, chain):
+    def _calc_endpoint_vel(self, chain):
     
         # CALL LOCKED!
         if (self._current_tool[chain]):
@@ -338,14 +362,13 @@ class AbstractRobot(object):
     def _calc_endpoint_vels(self):
     
         if (_endpoint_vel):
-            ###lib/array SpatialVelocity?
-            return SpatialVelocity[0]
+            return 
         
 
-        o = new SpatialVelocity[_endpoint_pose.Length]
-        for i in range(o.Length):
+        o = []
+        for i in range(self._endpoint_pose.Length):
         
-            o[i] = self._calc_endpoint_vel(i)
+            o.append(self._calc_endpoint_vel(i))
         
         return o
     
@@ -906,223 +929,223 @@ class AbstractRobot(object):
     
 
 
-    def async_jog_freespace(self, joint_position, max_velocity, wait, time= -1)
+    # def async_jog_freespace(self, joint_position, max_velocity, wait, time= -1)
     
-        with self._lock:
+    #     with self._lock:
         
-            if (self._command_mode != RobotCommandMode.jog):
+    #         if (self._command_mode != RobotCommandMode.jog):
             
-                raise Exception("Robot not in jog mode")
-            
-
-            if (not self._ready):
-            
-                raise Exception("Robot not ready")
-            
-            
-            if (joint_position.Length != self._joint_count):
-            
-                raise Exception("joint_position array must have _joint_count elements")
+    #             raise Exception("Robot not in jog mode")
             
 
-            if (max_velocity.Length != self._joint_count):
+    #         if (not self._ready):
             
-                raise Exception("max_velocity array must have _joint_count elements")
+    #             raise Exception("Robot not ready")
+            
+            
+    #         if (joint_position.Length != self._joint_count):
+            
+    #             raise Exception("joint_position array must have _joint_count elements")
             
 
-            for i in range(self._joint_count):
+    #         if (max_velocity.Length != self._joint_count):
             
-                if (np.abs(self._joint_position[i] - joint_position[i]) > self._jog_joint_limit)
+    #             raise Exception("max_velocity array must have _joint_count elements")
+            
+
+    #         for i in range(self._joint_count):
+            
+    #             if (np.abs(self._joint_position[i] - joint_position[i]) > self._jog_joint_limit)
                 
-                    raise Exception("Position command must be within 15 degrees from current")
+    #                 raise Exception("Position command must be within 15 degrees from current")
                 
 
-                if (max_velocity[i] < 0):
+    #             if (max_velocity[i] < 0):
                 
-                    raise Exception("max_vel must be greater than zero")
+    #                 raise Exception("max_vel must be greater than zero")
                 
             
 
 
-            if (self._jog_completion_source):
+    #         if (self._jog_completion_source):
             
-                self._jog_completion_source.TrySetException(OperationAbortedException("Operation interrupted by new jog command"))
-                self._jog_completion_source = None
+    #             self._jog_completion_source.TrySetException(OperationAbortedException("Operation interrupted by new jog command"))
+    #             self._jog_completion_source = None
             
 
-            now = self._stopwatch.ElapsedMilliseconds
+    #         now = self._stopwatch.ElapsedMilliseconds
 
-            if (self._jog_trajectory_generator):
+    #         if (self._jog_trajectory_generator):
             
-                limits = JointTrajectoryLimits()
-                if self._operational_mode== RobotOperationalMode.manual_reduced_speed:
-                    limits.a_max = [x.joint_limits.reduced_acceleration for x in self._robot_info.joint_info]
-                    limits.v_max = [x.joint_limits.reduced_velocity for x in self._robot_info.joint_info]
+    #             limits = JointTrajectoryLimits()
+    #             if self._operational_mode== RobotOperationalMode.manual_reduced_speed:
+    #                 limits.a_max = [x.joint_limits.reduced_acceleration for x in self._robot_info.joint_info]
+    #                 limits.v_max = [x.joint_limits.reduced_velocity for x in self._robot_info.joint_info]
                     
-                elif self._operational_mode== RobotOperationalMode.manual_full_speed:
-                elif self._operational_mode== RobotOperationalMode.cobot:
-                    limits.a_max = [x.joint_limits.acceleration for x in self._robot_info.joint_info]
-                    limits.v_max = [x.joint_limits.velocity for x in self._robot_info.joint_info]
+    #             elif self._operational_mode== RobotOperationalMode.manual_full_speed:
+    #             elif self._operational_mode== RobotOperationalMode.cobot:
+    #                 limits.a_max = [x.joint_limits.acceleration for x in self._robot_info.joint_info]
+    #                 limits.v_max = [x.joint_limits.velocity for x in self._robot_info.joint_info]
                     
-                else:
-                    raise Exception("Invalid operation mode for robot jog")
+    #             else:
+    #                 raise Exception("Invalid operation mode for robot jog")
                 
             
-                limits.x_min = [x.joint_limits.lower for x in self._robot_info.joint_info]
-                limits.x_max = [x.joint_limits.upper for x in self._robot_info.joint_info]
+    #             limits.x_min = [x.joint_limits.lower for x in self._robot_info.joint_info]
+    #             limits.x_max = [x.joint_limits.upper for x in self._robot_info.joint_info]
 
-                for i in range(self._joint_count):
+    #             for i in range(self._joint_count):
                 
-                    if (np.abs(max_velocity[i]) > limits.v_max[i]):
+    #                 if (np.abs(max_velocity[i]) > limits.v_max[i]):
                     
-                        raise Exception("max_velocity[i] is greater than joint limits (limits.v_max[i])")
+    #                     raise Exception("max_velocity[i] is greater than joint limits (limits.v_max[i])")
                     
                 
 
-                self._jog_trajectory_generator = TrapezoidalJointTrajectoryGenerator(self._joint_count, limits)
-                # ??
-                new_req = JointTrajectoryPositionRequest()
-                new_req.current_position = self._position_command ?? (double[])_joint_position.Clone()
-                new_req.current_velocity = self._velocity_command ?? new double[_joint_count]
-                new_req.desired_position = joint_position
-                new_req.desired_velocity = new double[_joint_count]
-                new_req.max_velocity = max_velocity
-                new_req.speed_ratio = self._speed_ratio
+    #             self._jog_trajectory_generator = TrapezoidalJointTrajectoryGenerator(self._joint_count, limits)
+    #             # ??
+    #             new_req = JointTrajectoryPositionRequest()
+    #             new_req.current_position = self._position_command ?? (double[])_joint_position.Clone()
+    #             new_req.current_velocity = self._velocity_command ?? new double[_joint_count]
+    #             new_req.desired_position = joint_position
+    #             new_req.desired_velocity = new double[_joint_count]
+    #             new_req.max_velocity = max_velocity
+    #             new_req.speed_ratio = self._speed_ratio
 
-                self._jog_trajectory_generator.UpdateDesiredPosition(new_req)
-                self._jog_start_time = now
+    #             self._jog_trajectory_generator.UpdateDesiredPosition(new_req)
+    #             self._jog_start_time = now
             
-            else
+    #         else
             
-                jog_trajectory_t = (now - self._jog_start_time)/1000.0
-                if (not self._jog_trajectory_generator.GetCommand(jog_trajectory_t, cmd)):
+    #             jog_trajectory_t = (now - self._jog_start_time)/1000.0
+    #             if (not self._jog_trajectory_generator.GetCommand(jog_trajectory_t, cmd)):
                 
-                    raise Exception("Cannot update jog command")
+    #                 raise Exception("Cannot update jog command")
                 
 
-                new_req = new JointTrajectoryPositionRequest()
-                new_req.current_position = cmd.command_position
-                new_req.current_velocity = cmd.command_velocity
-                new_req.desired_position = joint_position
-                new_req.desired_velocity = [0. for i in range(self._joint_count)]
-                new_req.max_velocity = max_velocity
-                new_req.speed_ratio = self._speed_ratio
+    #             new_req = new JointTrajectoryPositionRequest()
+    #             new_req.current_position = cmd.command_position
+    #             new_req.current_velocity = cmd.command_velocity
+    #             new_req.desired_position = joint_position
+    #             new_req.desired_velocity = [0. for i in range(self._joint_count)]
+    #             new_req.max_velocity = max_velocity
+    #             new_req.speed_ratio = self._speed_ratio
 
-                self._jog_trajectory_generator.UpdateDesiredPosition(new_req)
-                self._jog_start_time = now
+    #             self._jog_trajectory_generator.UpdateDesiredPosition(new_req)
+    #             self._jog_start_time = now
             
 
-            if (not wait):
+    #         if (not wait):
             
-                self._jog_completion_source = None
-                return Task.FromResult(0)
+    #             self._jog_completion_source = None
+    #             return Task.FromResult(0)
             
-            else:
+    #         else:
             
-                self._jog_completion_source = TaskCompletionSource()
-                return self._jog_completion_source.Task
+    #             self._jog_completion_source = TaskCompletionSource()
+    #             return self._jog_completion_source.Task
             
         
     
 
-    def async_jog_joint(self, joint_velocity, timeout, wait, rr_time= -1)
+    # def async_jog_joint(self, joint_velocity, timeout, wait, rr_time= -1)
     
-        with self._lock:
+    #     with self._lock:
         
-            if (self._command_mode != RobotCommandMode.jog):
+    #         if (self._command_mode != RobotCommandMode.jog):
             
-                raise Exception("Robot not in jog mode")
-            
-
-            if (not self._ready):
-            
-                raise Exception("Robot not ready")
+    #             raise Exception("Robot not in jog mode")
             
 
-            if (joint_velocity.Length != self._joint_count):
+    #         if (not self._ready):
             
-                raise Exception($"joint_velocity array must have _joint_count elements")
-            
-
-            if (time<= 0):
-            
-                raise Exception("Invalid jog timespecified")
+    #             raise Exception("Robot not ready")
             
 
-            for i in range( self._joint_count):
+    #         if (joint_velocity.Length != self._joint_count):
             
-                if (np.abs(joint_velocity[i]) > self._robot_info.joint_info[i].joint_limits.reduced_velocity):
+    #             raise Exception($"joint_velocity array must have _joint_count elements")
+            
+
+    #         if (time<= 0):
+            
+    #             raise Exception("Invalid jog timespecified")
+            
+
+    #         for i in range( self._joint_count):
+            
+    #             if (np.abs(joint_velocity[i]) > self._robot_info.joint_info[i].joint_limits.reduced_velocity):
                 
-                    raise Exception("Joint velocity exceeds joint limits")
+    #                 raise Exception("Joint velocity exceeds joint limits")
                 
             
 
-            if (self._jog_completion_source):
+    #         if (self._jog_completion_source):
             
-                self._jog_completion_source.TrySetException(OperationAbortedException("Operation interrupted by new jog command"))
-                self._jog_completion_source = None
+    #             self._jog_completion_source.TrySetException(OperationAbortedException("Operation interrupted by new jog command"))
+    #             self._jog_completion_source = None
             
 
-            now = self._stopwatch.ElapsedMilliseconds
+    #         now = self._stopwatch.ElapsedMilliseconds
 
-            if (self._jog_trajectory_generator):
+    #         if (self._jog_trajectory_generator):
             
-                limits = JointTrajectoryLimits()
-                if self._operational_mode== RobotOperationalMode.manual_reduced_speed:
-                    limits.a_max = [x.joint_limits.reduced_acceleration for x in self._robot_info.joint_info]
-                    limits.v_max = [x.joint_limits.reduced_velocity for x in self._robot_info.joint_info]
+    #             limits = JointTrajectoryLimits()
+    #             if self._operational_mode== RobotOperationalMode.manual_reduced_speed:
+    #                 limits.a_max = [x.joint_limits.reduced_acceleration for x in self._robot_info.joint_info]
+    #                 limits.v_max = [x.joint_limits.reduced_velocity for x in self._robot_info.joint_info]
                     
-                # elif self._operational_mode== RobotOperationalMode.manual_full_speed:
-                elif self._operational_mode== RobotOperationalMode.cobot:
-                    limits.a_max = [x.joint_limits.acceleration for x in self._robot_info.joint_info]
-                    limits.v_max = [x.joint_limits.velocity for x in self._robot_info.joint_info]
+    #             # elif self._operational_mode== RobotOperationalMode.manual_full_speed:
+    #             elif self._operational_mode== RobotOperationalMode.cobot:
+    #                 limits.a_max = [x.joint_limits.acceleration for x in self._robot_info.joint_info]
+    #                 limits.v_max = [x.joint_limits.velocity for x in self._robot_info.joint_info]
                     
-                else:
-                    raise Exception("Invalid operation mode for robot jog")
+    #             else:
+    #                 raise Exception("Invalid operation mode for robot jog")
                 
-                limits.x_min = [x.joint_limits.lower for x in self._robot_info.joint_info]
-                limits.x_max = [x.joint_limits.upper for x in self._robot_info.joint_info]
+    #             limits.x_min = [x.joint_limits.lower for x in self._robot_info.joint_info]
+    #             limits.x_max = [x.joint_limits.upper for x in self._robot_info.joint_info]
 
-                self._jog_trajectory_generator = TrapezoidalJointTrajectoryGenerator(self._joint_count, limits)
-                ###??
-                new_req = JointTrajectoryVelocityRequest()
-                new_req.current_position = _position_command ?? _joint_position
-                new_req.current_velocity = _velocity_command ?? new double[_joint_count]
-                new_req.desired_velocity = joint_velocity
-                new_req.speed_ratio = _speed_ratio
-                new_req.time= timeout
+    #             self._jog_trajectory_generator = TrapezoidalJointTrajectoryGenerator(self._joint_count, limits)
+    #             ###??
+    #             new_req = JointTrajectoryVelocityRequest()
+    #             new_req.current_position = _position_command ?? _joint_position
+    #             new_req.current_velocity = _velocity_command ?? new double[_joint_count]
+    #             new_req.desired_velocity = joint_velocity
+    #             new_req.speed_ratio = _speed_ratio
+    #             new_req.time= timeout
 
-                self._jog_trajectory_generator.UpdateDesiredVelocity(new_req)
-                self._jog_start_time = now
+    #             self._jog_trajectory_generator.UpdateDesiredVelocity(new_req)
+    #             self._jog_start_time = now
             
-            else:
+    #         else:
             
-                jog_trajectory_t = (now - self._jog_start_time) / 1000.0
-                if (not self._jog_trajectory_generator.GetCommand(jog_trajectory_t, cmd)):
+    #             jog_trajectory_t = (now - self._jog_start_time) / 1000.0
+    #             if (not self._jog_trajectory_generator.GetCommand(jog_trajectory_t, cmd)):
                 
-                    raise Exception("Cannot update jog command")
+    #                 raise Exception("Cannot update jog command")
                 
 
-                new_req = new JointTrajectoryVelocityRequest()
-                new_req.current_position = cmd.command_position
-                new_req.current_velocity = cmd.command_velocity
-                new_req.desired_velocity = joint_velocity
-                new_req.time= timeout
-                new_req.speed_ratio = self._speed_ratio
+    #             new_req = new JointTrajectoryVelocityRequest()
+    #             new_req.current_position = cmd.command_position
+    #             new_req.current_velocity = cmd.command_velocity
+    #             new_req.desired_velocity = joint_velocity
+    #             new_req.time= timeout
+    #             new_req.speed_ratio = self._speed_ratio
 
-                self._jog_trajectory_generator.UpdateDesiredVelocity(new_req)
-                self._jog_start_time = now
+    #             self._jog_trajectory_generator.UpdateDesiredVelocity(new_req)
+    #             self._jog_start_time = now
             
 
-            if (not wait)
+    #         if (not wait)
             
-                self._jog_completion_source = None
-                return Task.FromResult(0)
+    #             self._jog_completion_source = None
+    #             return Task.FromResult(0)
             
-            else
+    #         else
             
-                self._jog_completion_source = TaskCompletionSource()
-                return self._jog_completion_source.Task
+    #             self._jog_completion_source = TaskCompletionSource()
+    #             return self._jog_completion_source.Task
             
         
     
