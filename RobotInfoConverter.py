@@ -1,4 +1,4 @@
-import GeneralRoboticsToolbox as Rox
+import general_robotics_toolbox as Rox
 import numpy as np
 
 def ToToolboxRobot(robot_info):
